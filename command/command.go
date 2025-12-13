@@ -19,6 +19,7 @@ import (
 	"github.com/braydonk/yaml"
 	"github.com/sethvargo/ratchet/internal/atomic"
 	"github.com/sethvargo/ratchet/internal/version"
+	"github.com/sethvargo/ratchet/parser/surgical"
 )
 
 // Commands is the main list of all commands.
@@ -263,4 +264,35 @@ func computeNewlineTargets(before, after string) []int {
 	}
 
 	return result
+}
+
+// writeSurgicalReplacements applies surgical text replacements to files and writes them.
+func writeSurgicalReplacements(loadResults map[string]*surgical.LoadResult, replacements []surgical.Replacement, outPath string) error {
+	// Group replacements by filename
+	byFile := make(map[string][]surgical.Replacement)
+	for _, rep := range replacements {
+		byFile[rep.Filename] = append(byFile[rep.Filename], rep)
+	}
+
+	var merr error
+
+	for pth, lr := range loadResults {
+		outFile := outPath
+		if strings.HasSuffix(outPath, "/") {
+			outFile = filepath.Join(outPath, pth)
+		}
+		if outFile == "" {
+			outFile = pth
+		}
+
+		// Apply surgical replacements to original content
+		final := surgical.ApplyReplacements(lr.Contents, byFile[pth])
+
+		if err := atomic.Write(pth, outFile, strings.NewReader(final)); err != nil {
+			merr = errors.Join(merr, fmt.Errorf("failed to save file %s: %w", outFile, err))
+			continue
+		}
+	}
+
+	return merr
 }

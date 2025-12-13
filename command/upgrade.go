@@ -9,6 +9,7 @@ import (
 
 	"github.com/sethvargo/ratchet/internal/concurrency"
 	"github.com/sethvargo/ratchet/parser"
+	"github.com/sethvargo/ratchet/parser/surgical"
 	"github.com/sethvargo/ratchet/resolver"
 )
 
@@ -33,10 +34,11 @@ FLAGS
 `
 
 type UpgradeCommand struct {
-	flagConcurrency int64
-	flagParser      string
-	flagOut         string
-	flagPin         bool
+	flagConcurrency      int64
+	flagParser           string
+	flagOut              string
+	flagPin              bool
+	flagExperimentalYAML bool
 }
 
 func (c *UpgradeCommand) Desc() string {
@@ -55,6 +57,8 @@ func (c *UpgradeCommand) Flags() *flag.FlagSet {
 	f.StringVar(&c.flagParser, "parser", "actions", "parser to use")
 	f.StringVar(&c.flagOut, "out", "", "output path (defaults to input file)")
 	f.BoolVar(&c.flagPin, "pin", true, "pin resolved upgraded versions")
+	f.BoolVar(&c.flagExperimentalYAML, "experimental-yaml", false,
+		"use experimental YAML parser (go.yaml.in/yaml/v4) with surgical text replacement to preserve original file formatting")
 
 	return f
 }
@@ -65,14 +69,24 @@ func (c *UpgradeCommand) Run(ctx context.Context, originalArgs []string) error {
 		return fmt.Errorf("failed to parse flags: %w", err)
 	}
 
-	par, err := parser.For(ctx, c.flagParser)
-	if err != nil {
-		return err
-	}
-
 	res, err := resolver.NewDefaultResolver(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to create resolver: %w", err)
+	}
+
+	// Use surgical approach if experimental-yaml flag is set
+	if c.flagExperimentalYAML {
+		return c.runSurgical(ctx, args, res)
+	}
+
+	// Default: use AST-based approach
+	return c.runAST(ctx, args, res)
+}
+
+func (c *UpgradeCommand) runAST(ctx context.Context, args []string, res resolver.Resolver) error {
+	par, err := parser.For(ctx, c.flagParser)
+	if err != nil {
+		return err
 	}
 
 	loadResult, err := loadYAMLFiles(os.DirFS("."), args)
@@ -99,6 +113,43 @@ func (c *UpgradeCommand) Run(ctx context.Context, originalArgs []string) error {
 	}
 
 	if err := loadResult.writeYAMLFiles(c.flagOut); err != nil {
+		return fmt.Errorf("failed to save files: %w", err)
+	}
+
+	return nil
+}
+
+func (c *UpgradeCommand) runSurgical(ctx context.Context, args []string, res resolver.Resolver) error {
+	par, err := surgical.For(c.flagParser)
+	if err != nil {
+		return err
+	}
+	if par == nil {
+		return fmt.Errorf("parser %q not supported for preserve-formatting mode", c.flagParser)
+	}
+
+	loadResults, err := surgical.LoadYAMLFiles(os.DirFS("."), args)
+	if err != nil {
+		return err
+	}
+
+	if len(loadResults) > 1 && c.flagOut != "" && !strings.HasSuffix(c.flagOut, "/") {
+		return fmt.Errorf("-out must be a directory when upgrading multiple files")
+	}
+
+	replacements, err := surgical.UpgradeSurgical(ctx, res, par, surgical.Nodes(loadResults), c.flagConcurrency)
+	if err != nil {
+		return fmt.Errorf("failed to upgrade refs: %w", err)
+	}
+
+	// If not pinning, we need to clear the NewComment to remove the ratchet comment
+	if !c.flagPin {
+		for i := range replacements {
+			replacements[i].NewComment = ""
+		}
+	}
+
+	if err := writeSurgicalReplacements(loadResults, replacements, c.flagOut); err != nil {
 		return fmt.Errorf("failed to save files: %w", err)
 	}
 

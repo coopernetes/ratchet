@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/sethvargo/ratchet/parser"
+	"github.com/sethvargo/ratchet/parser/surgical"
 )
 
 const unpinCommandDesc = `Revert pinned versions to their unpinned values`
@@ -35,7 +36,8 @@ FLAGS
 `
 
 type UnpinCommand struct {
-	flagOut string
+	flagOut              string
+	flagExperimentalYAML bool
 }
 
 func (c *UnpinCommand) Desc() string {
@@ -50,6 +52,8 @@ func (c *UnpinCommand) Flags() *flag.FlagSet {
 	}
 
 	f.StringVar(&c.flagOut, "out", "", "output path (defaults to input file)")
+	f.BoolVar(&c.flagExperimentalYAML, "experimental-yaml", false,
+		"use experimental YAML parser (go.yaml.in/yaml/v4) with surgical text replacement to preserve original file formatting")
 
 	return f
 }
@@ -60,6 +64,16 @@ func (c *UnpinCommand) Run(ctx context.Context, originalArgs []string) error {
 		return fmt.Errorf("failed to parse flags: %w", err)
 	}
 
+	// Use surgical approach if experimental-yaml flag is set
+	if c.flagExperimentalYAML {
+		return c.runSurgical(ctx, args)
+	}
+
+	// Default: use AST-based approach
+	return c.runAST(ctx, args)
+}
+
+func (c *UnpinCommand) runAST(ctx context.Context, args []string) error {
 	loadResult, err := loadYAMLFiles(os.DirFS("."), args)
 	if err != nil {
 		return err
@@ -70,10 +84,32 @@ func (c *UnpinCommand) Run(ctx context.Context, originalArgs []string) error {
 	}
 
 	if err := parser.Unpin(ctx, loadResult.nodes()); err != nil {
-		return fmt.Errorf("failed to pin refs: %w", err)
+		return fmt.Errorf("failed to unpin refs: %w", err)
 	}
 
 	if err := loadResult.writeYAMLFiles(c.flagOut); err != nil {
+		return fmt.Errorf("failed to save files: %w", err)
+	}
+
+	return nil
+}
+
+func (c *UnpinCommand) runSurgical(ctx context.Context, args []string) error {
+	loadResults, err := surgical.LoadYAMLFiles(os.DirFS("."), args)
+	if err != nil {
+		return err
+	}
+
+	if len(loadResults) > 1 && c.flagOut != "" && !strings.HasSuffix(c.flagOut, "/") {
+		return fmt.Errorf("-out must be a directory when pinning multiple files")
+	}
+
+	replacements, err := surgical.UnpinSurgical(ctx, surgical.Nodes(loadResults))
+	if err != nil {
+		return fmt.Errorf("failed to unpin refs: %w", err)
+	}
+
+	if err := writeSurgicalReplacements(loadResults, replacements, c.flagOut); err != nil {
 		return fmt.Errorf("failed to save files: %w", err)
 	}
 

@@ -9,6 +9,7 @@ require (
 	github.com/google/go-cmp v0.7.0
 	github.com/google/go-containerregistry v0.20.6
 	github.com/google/go-github/v73 v73.0.0
+	go.yaml.in/yaml/v4 v4.0.0-rc.3
 	golang.org/x/oauth2 v0.30.0
 	golang.org/x/sync v0.15.0
 )
